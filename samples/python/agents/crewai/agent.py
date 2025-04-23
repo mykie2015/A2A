@@ -12,15 +12,14 @@ import re
 from typing import Any, AsyncIterable, Dict, List
 from uuid import uuid4
 from common.utils.in_memory_cache import InMemoryCache
-from crewai import Agent, Crew, LLM, Task
+from crewai import Agent, Crew, Task
 from crewai.process import Process
 from crewai.tools import tool
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
 import logging
 from PIL import Image
 from pydantic import BaseModel
+from langchain_openai import ChatOpenAI
 
 logger = logging.getLogger(__name__)
 
@@ -41,12 +40,6 @@ class Imagedata(BaseModel):
   bytes: str | None = None
   error: str | None = None
 
-def get_api_key() -> str:
-  """Helper method to handle API Key."""
-  load_dotenv()
-  return os.getenv("GOOGLE_API_KEY")
-
-
 @tool("ImageGenerationTool")
 def generate_image_tool(prompt: str, session_id: str, artifact_file_id: str = None) -> str:
   """Image generation tool that generates images or modifies a given image based on a prompt."""
@@ -54,7 +47,17 @@ def generate_image_tool(prompt: str, session_id: str, artifact_file_id: str = No
   if not prompt:
     raise ValueError("Prompt cannot be empty")
 
-  client = genai.Client(api_key=get_api_key())
+  # Load Google key specifically for this tool until it's refactored
+  load_dotenv()
+  google_api_key = os.getenv("GOOGLE_API_KEY")
+  if not google_api_key:
+      raise ValueError("GOOGLE_API_KEY not found in environment variables for ImageGenerationTool")
+
+  # Keep google imports local to this function for clarity
+  from google import genai
+  from google.genai import types
+
+  client = genai.Client(api_key=google_api_key)
   cache = InMemoryCache()
 
   text_input = (
@@ -137,8 +140,27 @@ class ImageGenerationAgent:
   SUPPORTED_CONTENT_TYPES = ["text", "text/plain", "image/png"]
 
   def __init__(self):
+    # Load environment variables
+    load_dotenv()
+    openai_api_key = os.getenv("OPENAI_API_KEY")
+    openai_api_base = os.getenv("OPENAI_API_BASE")
+    llm_model = os.getenv("LLM_MODEL")
 
-    self.model = LLM(model="gemini/gemini-2.0-flash", api_key=get_api_key())
+    if not openai_api_key:
+        raise ValueError("OPENAI_API_KEY not found in environment variables")
+    if not openai_api_base:
+        raise ValueError("OPENAI_API_BASE not found in environment variables")
+    if not llm_model:
+        raise ValueError("LLM_MODEL not found in environment variables")
+
+
+    # Initialize OpenAI LLM for the agent
+    self.model = ChatOpenAI(
+        openai_api_key=openai_api_key,
+        openai_api_base=openai_api_base,
+        model_name=llm_model
+    )
+
 
     self.image_creator_agent = Agent(
         role="Image Creation Expert",

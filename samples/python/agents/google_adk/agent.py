@@ -1,6 +1,8 @@
 import json
 import random
 from typing import Any, AsyncIterable, Dict, Optional
+from dotenv import load_dotenv
+load_dotenv()
 from google.adk.agents.llm_agent import LlmAgent
 from google.adk.tools.tool_context import ToolContext
 from google.adk.artifacts import InMemoryArtifactService

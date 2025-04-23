@@ -3,11 +3,32 @@ import os
 import threading
 from collections.abc import AsyncIterable
 from typing import Annotated, Any, ClassVar
+from dotenv import load_dotenv
 
 from common.types import TextPart
 from pydantic import BaseModel, Field
 
 import marvin
+
+# Load environment variables
+load_dotenv()
+
+# Configure Marvin settings from environment variables
+openai_api_key = os.getenv("OPENAI_API_KEY")
+openai_api_base = os.getenv("OPENAI_API_BASE")
+llm_model = os.getenv("LLM_MODEL")
+
+if not openai_api_key:
+    raise ValueError("OPENAI_API_KEY not found in environment variables")
+if not openai_api_base:
+    raise ValueError("OPENAI_API_BASE not found in environment variables")
+if not llm_model:
+    raise ValueError("LLM_MODEL not found in environment variables")
+
+marvin.settings.openai.api_key = openai_api_key
+marvin.settings.openai.api_base = openai_api_base
+# Marvin often expects a prefix like 'openai/' for the model
+marvin.settings.llm_model = f"openai/{llm_model}"
 
 logger = logging.getLogger(__name__)
 

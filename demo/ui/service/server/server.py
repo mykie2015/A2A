@@ -1,6 +1,5 @@
 import asyncio
 import base64
-import threading
 import os
 import uuid
 from typing import Any
@@ -24,6 +23,9 @@ from service.types import (
     ListAgentResponse,
     GetEventResponse
 )
+import logging # Import logging
+
+logger = logging.getLogger(__name__) # Get logger instance
 
 class ConversationServer:
   """ConversationServer is the backend to serve the agent interactions in the UI
@@ -102,10 +104,12 @@ class ConversationServer:
 
   async def _send_message(self, request: Request):
     message_data = await request.json()
+    logger.info(f"--- Received /message/send request. Payload: {message_data}") 
     message = Message(**message_data['params'])
     message = self.manager.sanitize_message(message)
-    t = threading.Thread(target=lambda: asyncio.run(self.manager.process_message(message)))
-    t.start()
+    
+    await self.manager.process_message(message)
+
     return SendMessageResponse(result=MessageInfo(
         message_id=message.metadata['message_id'],
         conversation_id=message.metadata['conversation_id'] if 'conversation_id' in message.metadata else '',
@@ -170,7 +174,15 @@ class ConversationServer:
     return RegisterAgentResponse()
 
   async def _list_agents(self):
-    return ListAgentResponse(result=self.manager.agents)
+    logger.info("Received request to list agents.") # Log request start
+    try:
+      agents_list = self.manager.agents
+      logger.info(f"Agent list retrieved from manager: {agents_list}") # Log retrieved list
+      # Ensure an iterable is returned, even if None was retrieved
+      return ListAgentResponse(result=agents_list if agents_list is not None else [])
+    except Exception as e:
+        logger.error(f"Error retrieving agent list: {e}", exc_info=True) # Log any exceptions
+        return ListAgentResponse(result=[]) # Return empty list on error
 
   def _files(self, file_id):
     if file_id not in self._file_cache:

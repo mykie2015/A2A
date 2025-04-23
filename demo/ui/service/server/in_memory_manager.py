@@ -2,6 +2,11 @@ import asyncio
 import datetime
 from typing import Tuple, Optional
 import uuid
+import os  # Import os
+from dotenv import load_dotenv # Import dotenv
+import httpx # Import httpx
+import logging # Import logging
+
 from service.types import Conversation, Event
 from common.types import (
     Message,
@@ -12,10 +17,21 @@ from common.types import (
     Artifact,
     AgentCard,
     DataPart,
+    JSONRPCError,
 )
 from utils.agent_card import get_agent_card
 from service.server.application_manager import ApplicationManager
 from service.server import test_image
+
+# Import Langchain OpenAI
+from langchain_openai import ChatOpenAI
+# Import A2AClient
+from common.client import A2AClient, A2ACardResolver
+
+# Load environment variables
+load_dotenv()
+
+logger = logging.getLogger(__name__) # Get logger instance
 
 class InMemoryFakeAgentManager(ApplicationManager):
   """An implementation of memory based management with fake agent actions
@@ -29,8 +45,8 @@ class InMemoryFakeAgentManager(ApplicationManager):
   _tasks: list[Task]
   _events: list[Event]
   _pending_message_ids: list[str]
-  _next_message_idx: int
   _agents: list[AgentCard]
+  _llm: Optional[ChatOpenAI]
 
   def __init__(self):
     self._conversations = []
@@ -38,9 +54,31 @@ class InMemoryFakeAgentManager(ApplicationManager):
     self._tasks = []
     self._events = []
     self._pending_message_ids = []
-    self._next_message_idx = 0
     self._agents = []
     self._task_map = {}
+    self._llm = None
+
+    # Initialize LLM if keys are present
+    try:
+        openai_api_key = os.getenv("OPENAI_API_KEY")
+        openai_api_base = os.getenv("OPENAI_API_BASE")
+        llm_model = os.getenv("LLM_MODEL")
+
+        if not openai_api_key:
+            logger.warning("OPENAI_API_KEY not found for InMemoryFakeAgentManager LLM fallback.")
+        elif not openai_api_base:
+             logger.warning("OPENAI_API_BASE not found for InMemoryFakeAgentManager LLM fallback.")
+        elif not llm_model:
+            logger.warning("LLM_MODEL not found for InMemoryFakeAgentManager LLM fallback.")
+        else:
+            self._llm = ChatOpenAI(
+                model=llm_model,
+                api_key=openai_api_key,
+                base_url=openai_api_base
+            )
+            logger.info("InMemoryFakeAgentManager initialized LLM successfully.")
+    except Exception as e:
+        logger.warning(f"Failed to initialize LLM for InMemoryFakeAgentManager: {e}")
 
   def create_conversation(self) -> Conversation:
     conversation_id = str(uuid.uuid4())
@@ -63,19 +101,17 @@ class InMemoryFakeAgentManager(ApplicationManager):
         if 'conversation_id' in message.metadata
         else None
     )
-    # Now check the conversation and attach the message id.
     conversation = self.get_conversation(conversation_id)
     if conversation:
       conversation.messages.append(message)
+    
     self._events.append(Event(
         id=str(uuid.uuid4()),
         actor="host",
         content=message,
         timestamp=datetime.datetime.utcnow().timestamp(),
     ))
-    # Now actually process the message. If the response is async, return None
-    # for the message response and the updated message information for the
-    # incoming message (with ids attached).
+    
     task_id = str(uuid.uuid4())
     task = Task(
               id=task_id,
@@ -86,27 +122,165 @@ class InMemoryFakeAgentManager(ApplicationManager):
               ),
               history=[message],
           )
-    if self._next_message_idx != 0:
-      self._task_map[message_id] = task_id
-      self.add_task(task)
-    await asyncio.sleep(self._next_message_idx)
-    response = self.next_message()
+    self.add_task(task)
+    self._task_map[message_id] = task_id
+
+    response = None
+    agent_used_name = "LLM Fallback" # For logging
+
+    # === Start of CORRECT routing logic ===
+    if not self._agents: 
+        # --- LLM Fallback logic (No agents registered) ---
+        agent_used_name = "LLM Fallback"
+        logger.info(f"No agents registered. Using LLM fallback for message: {message.parts[0].text if message.parts else '[no text part]'}")
+        if self._llm: 
+            try:
+                prompt = "You are a helpful assistant managing an agent system. Politely inform the user that no agents are currently registered or available to handle their request."
+                llm_response = await self._llm.ainvoke(prompt)
+                response_text = llm_response.content
+                logger.info(f"LLM fallback response: {response_text}")
+                response = Message(role="agent", parts=[TextPart(text=response_text)])
+                task.status.state = TaskState.COMPLETED # LLM fallback is considered complete
+            except Exception as e:
+                logger.error(f"Error during LLM fallback: {e}", exc_info=True)
+                response = Message(role="agent", parts=[TextPart(text="Sorry, no agents are registered and I encountered an error trying to generate a specific response.")])
+                task.status.state = TaskState.ERROR
+                task.status.error = JSONRPCError(code=-32603, message=f"Internal error during LLM fallback: {e}")
+        else:
+            # Hardcoded response if LLM is not available
+            logger.warning("LLM not available for fallback.")
+            response = Message(role="agent", parts=[TextPart(text="No agents are currently registered or available.")])
+            task.status.state = TaskState.COMPLETED # Hardcoded response is complete
+    else:
+        # --- Route to first registered agent --- 
+        target_agent = self._agents[0]
+        agent_used_name = target_agent.name or target_agent.url
+        logger.info(f"Found registered agent '{agent_used_name}'. Routing message...")
+        try:
+            if not isinstance(target_agent, AgentCard):
+                 logger.error(f"Stored agent object is not an AgentCard: {type(target_agent)}")
+                 raise TypeError("Stored agent is not an AgentCard object")
+                 
+            client = A2AClient(agent_card=target_agent)
+            payload = {
+                "id": task_id,
+                "sessionId": conversation_id,
+                "acceptedOutputModes": ["text", "text/plain"], 
+                "message": message.model_dump(exclude_none=True),
+            }
+            logger.info(f"Sending task to agent '{agent_used_name}': {payload}")
+            task_response = await client.send_task(payload)
+
+            if task_response.error:
+                logger.error(f"Error received from agent '{agent_used_name}': {task_response.error}")
+                response_text = f"Error communicating with agent: {task_response.error.message}"
+                response = Message(role="agent", parts=[TextPart(text=response_text)])
+                task.status.state = TaskState.ERROR
+                task.status.error = task_response.error
+            elif task_response.result:
+                 response_found = False
+                 task_result = task_response.result # Convenience variable
+                 
+                 # --- Start NEW: Check for INPUT_REQUIRED state first --- 
+                 if task_result.status and task_result.status.state == TaskState.INPUT_REQUIRED and task_result.status.message:
+                     response = task_result.status.message
+                     # Ensure the role is appropriate for display
+                     if response.role != "agent":
+                         response.role = "agent"
+                     logger.info(f"Response found in status.message (INPUT_REQUIRED) for agent '{agent_used_name}'. TaskId: {task_id}")
+                     task.status.state = TaskState.INPUT_REQUIRED # Keep the state
+                     task.artifacts = task_result.artifacts # Save artifacts if any
+                     response_found = True
+                 # --- End NEW: Check for INPUT_REQUIRED ---
+
+                 # 1. Check History (if not already found)
+                 elif not response_found and task_result.history:
+                     response = task_result.history[-1]
+                     logger.info(f"Response found in HISTORY for agent '{agent_used_name}'. TaskId: {task_id}")
+                     task.status.state = TaskState.COMPLETED 
+                     task.artifacts = task_result.artifacts # Still save artifacts if any
+                     response_found = True
+                 # 2. If no history, check Artifacts (if not already found)
+                 elif not response_found and task_result.artifacts:
+                     logger.info(f"No response in history or status.message, checking ARTIFACTS for agent '{agent_used_name}'. TaskId: {task_id}")
+                     # Try to find the first TextPart in artifacts
+                     for artifact in task_result.artifacts:
+                         if artifact.parts:
+                             for part in artifact.parts:
+                                 if isinstance(part, TextPart):
+                                     response = Message(role="agent", parts=[part])
+                                     # Log snippet of the found text
+                                     log_text = part.text[:100] + '...' if len(part.text) > 100 else part.text
+                                     logger.info(f"Response found in ARTIFACTS for agent '{agent_used_name}'. TaskId: {task_id}. Content snippet: '{log_text}'")
+                                     task.status.state = TaskState.COMPLETED
+                                     task.artifacts = task_result.artifacts # Save all artifacts
+                                     response_found = True
+                                     break # Use the first text part found
+                         if response_found:
+                             break # Stop checking artifacts once found
+                     
+                     if not response_found:
+                         logger.warning(f"Agent '{agent_used_name}' returned artifacts, but no displayable TextPart found. TaskId: {task_id}. Artifacts: {task_result.artifacts}")
+                         response_text = "Agent returned data, but not in a displayable text format."
+                         response = Message(role="agent", parts=[TextPart(text=response_text)])
+                         task.status.state = TaskState.COMPLETED # Still completed, just not displayable
+                         task.artifacts = task_result.artifacts # Save artifacts
+                 
+                 # 3. If still no response found
+                 elif not response_found:
+                    logger.warning(f"Agent '{agent_used_name}' responded successfully, but the returned Task object contained NO usable message in history, artifacts, or status.message (for INPUT_REQUIRED state). TaskId: {task_id}. Check agent logs if response was expected. Full Task Result: {task_result}")
+                    response_text = "Agent processed the request but returned no messages or artifacts."
+                    response = Message(role="agent", parts=[TextPart(text=response_text)])
+                    task.status.state = TaskState.COMPLETED
+            else:
+                # Handle unexpected successful response structure (e.g., result is None)
+                logger.warning(f"Agent '{agent_used_name}' response structure unexpected (e.g., result is None). TaskId: {task_id}. Full JSON-RPC Response: {task_response}")
+                response_text = "Agent processed the request but did not return a valid result structure."
+                response = Message(role="agent", parts=[TextPart(text=response_text)])
+                task.status.state = TaskState.COMPLETED
+
+        except Exception as e:
+            logger.error(f"Exception during communication with agent '{agent_used_name}'. TaskId: {task_id}. Error: {e}", exc_info=True)
+            response_text = f"Failed to communicate with the registered agent: {e}"
+            response = Message(role="agent", parts=[TextPart(text=response_text)])
+            # --- Safely set TaskState.ERROR ---
+            try:
+                task.status.state = TaskState.ERROR
+            except Exception as state_err:
+                logger.error(f"Failed to set TaskState.ERROR: {state_err}", exc_info=True)
+            # --- End safe set ---
+            task.status.error = JSONRPCError(code=-32603, message=f"Internal error sending to agent: {e}")
+        # --- End agent routing ---
+    # === End of CORRECT routing logic ===
+
+    # Ensure response is not None before proceeding 
+    if response is None:
+        logger.error("Failed to generate any response (agent or fallback).")
+        response = Message(role="agent", parts=[TextPart(text="Sorry, I encountered an internal error processing your request.")])
+        # --- Safely set TaskState.ERROR ---
+        try:
+            task.status.state = TaskState.ERROR
+        except Exception as state_err:
+            logger.error(f"Failed to set TaskState.ERROR: {state_err}", exc_info=True)
+        # --- End safe set ---
+        task.status.error = JSONRPCError(code=-32603, message="Internal error: No response generated.")
+
     response.metadata = {**message.metadata, **{'message_id': str(uuid.uuid4())}}
     if conversation:
       conversation.messages.append(response)
+    
     self._events.append(Event(
         id=str(uuid.uuid4()),
-        actor="host",
+        actor="agent", # Changed actor to agent
         content=response,
         timestamp=datetime.datetime.utcnow().timestamp(),
     ))
+    
     self._pending_message_ids.remove(message.metadata['message_id'])
-    # Now clean up the task
-    if task:
-      task.status.state = TaskState.COMPLETED
-      task.artifacts = [Artifact(name="response", parts=response.parts)]
-      task.history.append(response)
-      self.update_task(task)
+    
+    # Update task status (most states set above)
+    task.history.append(response) # Add final response to history
+    self.update_task(task)
 
   def add_task(self, task: Task):
     self._tasks.append(task)
@@ -119,11 +293,6 @@ class InMemoryFakeAgentManager(ApplicationManager):
 
   def add_event(self, event: Event):
     self._events.append(event)
-
-  def next_message(self) -> Message:
-    message = _message_queue[self._next_message_idx]
-    self._next_message_idx = (self._next_message_idx + 1) % len(_message_queue)
-    return message
 
   def get_conversation(
       self,
@@ -178,39 +347,3 @@ class InMemoryFakeAgentManager(ApplicationManager):
   def events(self) -> list[Event]:
     return self._events
 
-# This represents the precanned responses that will be returned in order.
-# Extend this list to test more functionality of the UI
-_message_queue: list[Message] = [
-    Message(role="agent", parts=[TextPart(text="Hello")]),
-    Message(role="agent", parts=[
-        DataPart(
-            data={
-              'type': 'form',
-              'form': {
-                  'type': 'object',
-                  'properties': {
-                      'name': {
-                          'type': 'string',
-                          'description': 'Enter your name',
-                          'title': 'Name',
-                      },
-                      'date': {
-                          'type': 'string',
-                          'format': 'date',
-                          'description': 'Birthday',
-                          'title': 'Birthday',
-                      },
-                  },
-                  'required': ['date'],
-              },
-              'form_data': {
-                  'name': 'John Smith',
-              },
-              'instructions': "Please provide your birthday and name",
-           }
-        ),
-    ]),
-    Message(role="agent", parts=[TextPart(text="I like cats")]),
-    test_image.test_image,
-    Message(role="agent", parts=[TextPart(text="And I like dogs")]),
-]

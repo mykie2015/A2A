@@ -1,0 +1,23 @@
+--index-url https://mirrors.aliyun.com/pypi/simple/
+
+python-dotenv
+crewai
+langchain-openai
+langchain-core
+langgraph
+semantic-kernel
+llama-index-core==0.12.32
+llama-index-llms-openai==0.3.38
+llama-cloud==0.1.18
+marvin
+google-cloud-aiplatform
+pillow==11.2.1
+httpx
+starlette
+uvicorn==0.34.2
+httpx-sse==0.4.0
+pyjwt==2.10.1
+anyio==4.9.0
+asyncclick
+
+# Removed UI Demo Dependencies: 

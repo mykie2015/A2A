@@ -2,11 +2,15 @@ import base64
 import os
 from pydantic import BaseModel, Field
 from typing import Any, Optional
+from dotenv import load_dotenv
 
 from llama_index.core.llms import ChatMessage
 from llama_index.core.workflow import Context, Event, StartEvent, StopEvent, Workflow, step
-from llama_index.llms.google_genai import GoogleGenAI
+from llama_index.llms.openai import OpenAI
 from llama_cloud_services.parse import LlamaParse
+
+# Load environment variables at the module level
+load_dotenv()
 
 ## Workflow Events
 
@@ -46,8 +50,29 @@ class ChatResponse(BaseModel):
 class ParseAndChat(Workflow):
     def __init__(self, timeout: Optional[float] = None, verbose: bool = False, **workflow_kwargs: Any):
         super().__init__(timeout=timeout, verbose=verbose, **workflow_kwargs)
-        self._sllm = GoogleGenAI(model="gemini-2.0-flash", api_key=os.getenv("GOOGLE_API_KEY")).as_structured_llm(ChatResponse)
-        self._parser = LlamaParse(api_key=os.getenv("LLAMA_CLOUD_API_KEY"))
+        # Load OpenAI config from environment
+        openai_api_key = os.getenv("OPENAI_API_KEY")
+        openai_api_base = os.getenv("OPENAI_API_BASE")
+        llm_model = os.getenv("LLM_MODEL")
+        llama_cloud_api_key = os.getenv("LLAMA_CLOUD_API_KEY")
+
+        if not openai_api_key:
+            raise ValueError("OPENAI_API_KEY not found in environment variables")
+        if not openai_api_base:
+            raise ValueError("OPENAI_API_BASE not found in environment variables")
+        if not llm_model:
+            raise ValueError("LLM_MODEL not found in environment variables")
+        if not llama_cloud_api_key:
+            raise ValueError("LLAMA_CLOUD_API_KEY not found in environment variables")
+
+        # Initialize OpenAI LLM
+        llm = OpenAI(
+            model=llm_model,
+            api_key=openai_api_key,
+            api_base=openai_api_base
+        )
+        self._sllm = llm.as_structured_llm(ChatResponse)
+        self._parser = LlamaParse(api_key=llama_cloud_api_key)
         self._system_prompt_template = """\
 You are a helpful assistant that can answer questions about a document, provide citations, and engage in a conversation.
 

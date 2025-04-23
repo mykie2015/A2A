@@ -1,11 +1,15 @@
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
 from langchain_core.tools import tool
 from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import AIMessage, ToolMessage
 import httpx
+import os
 from typing import Any, Dict, AsyncIterable, Literal
 from pydantic import BaseModel
+from dotenv import load_dotenv
+
+load_dotenv()
 
 memory = MemorySaver()
 
@@ -62,7 +66,22 @@ class CurrencyAgent:
     )
      
     def __init__(self):
-        self.model = ChatGoogleGenerativeAI(model="gemini-2.0-flash")
+        openai_api_key = os.getenv("OPENAI_API_KEY")
+        openai_api_base = os.getenv("OPENAI_API_BASE")
+        llm_model = os.getenv("LLM_MODEL")
+
+        if not openai_api_key:
+            raise ValueError("OPENAI_API_KEY not found in environment variables")
+        if not openai_api_base:
+            raise ValueError("OPENAI_API_BASE not found in environment variables")
+        if not llm_model:
+            raise ValueError("LLM_MODEL not found in environment variables")
+
+        self.model = ChatOpenAI(
+            model=llm_model,
+            api_key=openai_api_key,
+            base_url=openai_api_base
+        )
         self.tools = [get_exchange_rate]
 
         self.graph = create_react_agent(

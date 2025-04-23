@@ -1,4 +1,3 @@
-
 """A UI solution and host service to interact with the agent framework.
 run:
   uv main.py
@@ -6,6 +5,7 @@ run:
 import asyncio
 import os
 import threading
+import logging
 
 import mesop as me
 
@@ -36,24 +36,36 @@ def on_load(e: me.LoadEvent):  # pylint: disable=unused-argument
     else:
       state.current_conversation_id = ""
     
-    # check if the API key is set in the environment
-    # and if the user is using Vertex AI
-    uses_vertex_ai = os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "").upper() == "TRUE"
-    api_key = os.getenv("GOOGLE_API_KEY", "")
+    # Check for OpenAI API key
+    openai_api_key = os.getenv("OPENAI_API_KEY", "")
+    # Remove lines checking for Google keys/config
+    # uses_vertex_ai = os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "").upper() == "TRUE"
+    # google_api_key = os.getenv("GOOGLE_API_KEY", "")
     
-    if uses_vertex_ai:
-        state.uses_vertex_ai = True
-    elif api_key:
-        state.api_key = api_key
+    # Add loading of base URL (though not storing in state for now)
+    # This ensures it's loaded if other parts of the app need it directly
+    openai_api_base = os.getenv("OPENAI_API_BASE", "") 
+
+    if openai_api_key: # Check only for OpenAI key
+        state.api_key = openai_api_key
+        # Clear potentially stale flags/keys from previous logic
+        state.uses_vertex_ai = False 
+        state.api_key_dialog_open = False
+    # Remove other elif branches for Google keys/Vertex
+    # elif uses_vertex_ai: ...
+    # elif google_api_key: ...
     else:
-        # Show the API key dialog if both are not set
+        # Show the API key dialog only if OpenAI key is not found
+        state.uses_vertex_ai = False
+        state.api_key = "" 
         state.api_key_dialog_open = True
 
-# Policy to allow the lit custom element to load
+# Modify the Security Policy definition
 security_policy=me.SecurityPolicy(
     allowed_script_srcs=[
       'https://cdn.jsdelivr.net',
-    ]
+    ],
+    dangerously_disable_trusted_types=True
   )
 
 
@@ -144,6 +156,8 @@ app.mount(
 )
 
 if __name__ == "__main__":    
+    # Add basic logging configuration
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
     import uvicorn
     # Setup the connection details, these should be set in the environment
@@ -160,4 +174,5 @@ if __name__ == "__main__":
         reload=True,
         reload_includes=["*.py", "*.js"],
         timeout_graceful_shutdown=0,
+        access_log=False
     )

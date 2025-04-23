@@ -73,17 +73,25 @@ class SemanticKernelTravelAgent:
     def __init__(self):
 
         api_key = os.getenv("OPENAI_API_KEY", None)
+        base_url = os.getenv("OPENAI_API_BASE", None)
+        model_id = os.getenv("LLM_MODEL", None)
+
         if not api_key:
             raise ValueError("OPENAI_API_KEY environment variable not set.")
-        
-        model_id = os.getenv("OPENAI_CHAT_MODEL_ID", "gpt-4.1")
+        if not base_url:
+            raise ValueError("OPENAI_API_BASE environment variable not set.")
+        if not model_id:
+            raise ValueError("LLM_MODEL environment variable not set.")
+
+        service_config = {
+            "ai_model_id": model_id,
+            "api_key": api_key,
+            "base_url": base_url
+        }
 
         # Define a CurrencyExchangeAgent to handle currency-related tasks
         currency_exchange_agent = ChatCompletionAgent(
-            service=OpenAIChatCompletion(
-                api_key=api_key,
-                ai_model_id=model_id,
-            ),
+            service=OpenAIChatCompletion(**service_config),
             name="CurrencyExchangeAgent",
             instructions=(
                 "You specialize in handling currency-related requests from travelers. "
@@ -96,10 +104,7 @@ class SemanticKernelTravelAgent:
 
         # Define an ActivityPlannerAgent to handle activity-related tasks
         activity_planner_agent = ChatCompletionAgent(
-            service=OpenAIChatCompletion(
-                api_key=api_key,
-                ai_model_id=model_id,
-            ),
+            service=OpenAIChatCompletion(**service_config),
             name="ActivityPlannerAgent",
             instructions=(
                 "You specialize in planning and recommending activities for travelers. "
@@ -112,10 +117,7 @@ class SemanticKernelTravelAgent:
 
         # Define the main TravelManagerAgent to delegate tasks to the appropriate agents
         self.agent = ChatCompletionAgent(
-            service=OpenAIChatCompletion(
-                api_key=api_key,
-                ai_model_id=model_id,
-            ),
+            service=OpenAIChatCompletion(**service_config),
             name="TravelManagerAgent",
             instructions=(
                 "Your role is to carefully analyze the traveler's request and forward it to the appropriate agent based on the "
@@ -149,7 +151,7 @@ class SemanticKernelTravelAgent:
         """
         await self._ensure_thread_exists(session_id)
 
-        # Use SK’s get_response for a single shot
+        # Use SK's get_response for a single shot
         response = await self.agent.get_response(
             messages=user_input,
             thread=self.thread,
